@@ -257,6 +257,29 @@ def setup_logging(
     queue: Union[multiprocessing.Queue, None] = None,
     max_file_size_mb: int = 50,
 ) -> logging.Logger:
+    """
+    Configures logger with Rich console output and rotating file logging. Adds global exception handlers.
+
+    Parameters
+    ----------
+    output_file : str, optional
+        Path to the log file. If None, generates a timestamped file in the 'logs/' directory.
+    logger : logging.Logger, optional
+        The specific logger instance to configure. Defaults to the root logger.
+    level : int, optional
+        The logging level (e.g., logging.INFO). Defaults to the global LOG_LEVEL.
+    console_markup : bool, default False
+        If True, Rich style markup (e.g., '[bold red]Text[/]') in log messages (console) will be applied.
+    queue : multiprocessing.Queue, optional
+        Queue for multiprocessing. If provided, configures a QueueHandler. (handled internally i.e. in parallel_session context)
+    max_file_size_mb : int, default 50
+        Maximum size in megabytes before the log file is rotated. Rotated files are named with incremental suffixes.
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance.
+    """
     level = level or LOG_LEVEL
 
     if queue is not None:
@@ -340,6 +363,15 @@ def setup_logging(
 
 
 def archive_logs(destination: Union[str, pathlib.Path]):
+    """
+    Moves current and rotated log files to a specified archive directory. Currently active log file
+    is copied with a new incremental suffix. Original log files remain in place.
+
+    Parameters
+    ----------
+    destination : str or pathlib.Path
+        The directory where log files should be moved. Folder will be created if it does not exist.
+    """
     dest_dir = pathlib.Path(destination)
     archiver_log = logging.getLogger("System.Archiver")
 
@@ -375,12 +407,32 @@ def archive_logs(destination: Union[str, pathlib.Path]):
 
 
 class LogContext:
+    """
+    Context managers for controlling logging behavior within a specific scopes.
+
+    Parameters
+    ----------
+    logger : logging.Logger
+        The logger instance to manipulate.
+    """
 
     def __init__(self, logger: logging.Logger) -> None:
         self.logger = logger
 
     @contextmanager
     def grouped_logs(self, worker_name: str) -> Generator[None, None, None]:
+        """
+        Buffers log output for the duration of the context.
+
+        Realtime output is streamed to the console. File output is buffered and written as a
+        single indented block with a header/footer upon exit into the file log only.
+
+        Parameters
+        ----------
+        worker_name : str
+            The name to display in the header/footer of the log block.
+        """
+
         class SimpleBuffer(logging.Handler):
             def __init__(self):
                 super().__init__()
@@ -430,6 +482,18 @@ class LogContext:
 
     @contextmanager
     def parallel_session(self) -> Generator[dict, None, None]:
+        """
+        Initializes a QueueListener to handle logs from multiple processes safely.
+
+        Starts a listener in the main process that directs worker logs to the configured
+        handlers (console and file).
+
+        Yields
+        ------
+        dict
+            Configuration dictionary containing 'initializer' and 'initargs' that are to be
+            passed to the ProcessPoolExecutor.
+        """
         manager = multiprocessing.Manager()
         log_queue = manager.Queue()
 
@@ -452,6 +516,12 @@ class LogContext:
 
     @contextmanager
     def redirect_tqdm(self) -> Generator[None, None, None]:
+        """
+        Redirects tqdm output to the logger's console handler.
+
+        Ensures progress bars render correctly via Rich's Live display without duplications
+        preventing spam in the console and log file. Works only in the main process.
+        """
         handlers = self.logger.handlers + logging.getLogger().handlers
         handler = next((h for h in handlers if isinstance(h, RichHandler) and hasattr(h, 'console')), None)
 
@@ -489,6 +559,11 @@ class LogContext:
 
     @contextmanager
     def suppress_console_logging(self) -> Generator[None, None, None]:
+        """
+        Temporarily prevents logs from appearing in the console.
+
+        Logs are still written to the file handler.
+        """
         suppress_filter = SuppressFilter()
         self.logger.addFilter(suppress_filter)
         try:
@@ -498,6 +573,9 @@ class LogContext:
 
     @contextmanager
     def duplicate_filter(self) -> Generator[None, None, None]:
+        """
+        Temporarily filters out consecutive duplicate log messages. They are logged only once.
+        """
         if any(isinstance(f, DuplicateFilter) for f in self.logger.filters):
             yield
         else:
@@ -510,6 +588,12 @@ class LogContext:
 
     @contextmanager
     def logging_raised_Error(self) -> Generator[None, None, None]:
+        """
+        Catches any exception raised within the context, logs it with a traceback, and then
+        re-raises the exception. This is automatically covered within setup_logging's excepthook
+        and threading excepthook. Usage is only for cases where the global excepthook is
+        replaced or unavailable.
+        """
         try:
             yield
         except Exception as e:
@@ -518,6 +602,14 @@ class LogContext:
 
     @contextmanager
     def set_logging_level(self, level: int) -> Generator[None, None, None]:
+        """
+        Temporarily changes the logger's severity level.
+
+        Parameters
+        ----------
+        level : int
+            The new logging level (e.g., logging.DEBUG).
+        """
         _old_level = self.logger.level
         self.logger.setLevel(level)
         try:
@@ -527,6 +619,9 @@ class LogContext:
 
     @contextmanager
     def suppress_logging(self) -> Generator[None, None, None]:
+        """
+        Temporarily disables all logging output by raising the level to CRITICAL + 1.
+        """
         original_level = self.logger.level
         self.logger.setLevel(logging.CRITICAL + 1)
         try:
@@ -536,6 +631,22 @@ class LogContext:
 
     @contextmanager
     def log_and_suppress(self, *exceptions: Type[Exception], msg: str = "An exception was suppressed"):
+        """
+        Catches specified exceptions, logs them, and suppresses propagation, i.e. for cases like:
+
+        try:
+            x = 1 / 0
+        except ZeroDivisionError as e:
+            msg = f"An exception was suppressed: {type(e).__name__} - {e}"
+            logger.exception(msg, exc_info=True)
+
+        Parameters
+        ----------
+        *exceptions : Type[Exception]
+            Variable length argument list of exception types to catch.
+        msg : str, default "An exception was suppressed"
+            The message to log accompanying the traceback.
+        """
         try:
             yield
         except exceptions or (Exception,) as e:
@@ -543,6 +654,11 @@ class LogContext:
 
     @contextmanager
     def suppress_terminal_print(self) -> Generator[None, None, None]:
+        """
+        Redirects standard output (stdout) and standard error (stderr) to os.devnull.
+        Useful for not flooding the terminal with output from libraries that print directly
+        to the console.
+        """
         if is_in_ipython():
             from IPython.display import display
             from ipywidgets import Output
@@ -556,6 +672,15 @@ class LogContext:
 
 
 class LogDecorator:
+    """
+    Decorators applying log context behaviors to functions.
+
+    Parameters
+    ----------
+    logger : logging.Logger, optional
+        The logger to use. If None, a logger corresponding to the function name is used.
+    """
+
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.default_logger = logger
 
@@ -595,6 +720,29 @@ class LogDecorator:
         return decorator
 
     def grouped_logs(self, extractor: Optional[Callable] = None) -> Callable:
+        """
+        Decorator to buffer logs generated by the function.
+
+        Parameters
+        ----------
+        extractor : Callable, optional
+            A function that accepts the arguments of the decorated function
+            and returns a string to use as the worker/group name.
+            If None, the function name is used.
+
+            example:
+            ```python
+            @log.LogDecorator().grouped_logs(lambda file: f"Worker-{file}")
+            def myfunc(file):
+                ...
+            ```
+
+        Returns
+        -------
+        Callable
+            The decorated function.
+        """
+
         def mapper(default_logger: logging.Logger, target: Any, func_name: str) -> tuple[logging.Logger, tuple, dict]:
             if target:
                 if isinstance(target, logging.Logger):
@@ -610,7 +758,13 @@ class LogDecorator:
         )
 
     def suppress_console_logging(self) -> Callable:
+        """
+        Decorator that suppresses console logging for the duration of the function.
+        """
         return self._create_decorator(lambda logger: LogContext(logger).suppress_console_logging)
 
     def logging_raised_Error(self) -> Callable:
+        """
+        Decorator that logs any exception raised by the function before re-raising it.
+        """
         return self._create_decorator(lambda logger: LogContext(logger).logging_raised_Error)
