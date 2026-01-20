@@ -505,7 +505,7 @@ class LogContext:
         listener.start()
         pool_config = {
             "initializer": worker_init,
-            "initargs": (log_queue, self.logger.level)
+            "initargs": (log_queue, self.logger.getEffectiveLevel()),
         }
 
         try:
