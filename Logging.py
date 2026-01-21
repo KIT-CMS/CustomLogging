@@ -27,6 +27,7 @@ LOG_LEVEL = logging.INFO
 CONSOLE = Console()
 
 LOG_STATE = {"handler": None, "loggers": weakref.WeakSet()}
+ALLOWED_PREFIXES = []
 
 
 # Handlers
@@ -71,6 +72,17 @@ class CustomRichHandler(RichHandler):
 
 
 # Filters
+
+class ThirdPartyFilter(logging.Filter):
+    def __init__(self, allowed_prefixes):
+        super().__init__()
+        self.allowed_prefixes = allowed_prefixes
+
+    def filter(self, record):
+        if not self.allowed_prefixes or record.name == "":
+            return True
+        return any(record.name.startswith(prefix) for prefix in self.allowed_prefixes)
+
 
 class FileDisplayFilter(logging.Filter):
     def __init__(self):
@@ -229,7 +241,9 @@ def handle_thread_exception(args):
     handle_uncaught_exception(args.exc_type, args.exc_value, args.exc_traceback)
 
 
-def worker_init(log_queue: multiprocessing.Queue, level: int = logging.INFO):
+def worker_init(log_queue: multiprocessing.Queue, level: int = logging.INFO, allowed_prefixes: list = []):
+    global ALLOWED_PREFIXES
+    ALLOWED_PREFIXES = allowed_prefixes
     root = logging.getLogger()
     if root.hasHandlers():
         root.handlers.clear()
@@ -243,6 +257,10 @@ def worker_init(log_queue: multiprocessing.Queue, level: int = logging.INFO):
     threading.excepthook = handle_thread_exception
     handler = logging.handlers.QueueHandler(log_queue)
     root.addHandler(handler)
+
+    third_party_filter = ThirdPartyFilter(allowed_prefixes)
+    handler.addFilter(third_party_filter)
+
     for name in logging.root.manager.loggerDict:
         logger = logging.getLogger(name)
         logger.propagate = True
@@ -281,16 +299,21 @@ def setup_logging(
         Configured logger instance.
     """
     level = level or LOG_LEVEL
+    global ALLOWED_PREFIXES
 
     if queue is not None:
         root = logging.getLogger()
         if root.hasHandlers():
             root.handlers.clear()
-        root.addHandler(logging.handlers.QueueHandler(queue))
+        q_handler = logging.handlers.QueueHandler(queue)
+        root.addHandler(q_handler)
         root.setLevel(level)
         logger.handlers.clear()
         logger.propagate = True
         logger.setLevel(level)
+        ALLOWED_PREFIXES = [logger.name] if logger.name else []
+        third_party_filter = ThirdPartyFilter(ALLOWED_PREFIXES)
+        q_handler.addFilter(third_party_filter)
         return logger
 
     if multiprocessing.current_process().name != 'MainProcess':
@@ -354,6 +377,11 @@ def setup_logging(
 
     for tracked in LOG_STATE["loggers"]:
         tracked.propagate = True
+
+    ALLOWED_PREFIXES = [_logger.name for _logger in list(LOG_STATE["loggers"]) if _logger.name]
+    third_party_filter = ThirdPartyFilter(ALLOWED_PREFIXES)
+    for h in root.handlers:
+        h.addFilter(third_party_filter)
 
     logger.archive_logs = archive_logs
     sys.excepthook = handle_uncaught_exception
@@ -469,6 +497,9 @@ class LogContext:
             lg.propagate = True
             lg.setLevel(self.logger.level)
 
+        third_party_filter = ThirdPartyFilter(ALLOWED_PREFIXES)
+        buffer.addFilter(third_party_filter)
+
         try:
             yield
         finally:
@@ -503,9 +534,12 @@ class LogContext:
             respect_handler_level=True
         )
         listener.start()
+
+        allowed_prefixes = [_logger.name for _logger in list(LOG_STATE["loggers"]) if _logger.name]
+
         pool_config = {
             "initializer": worker_init,
-            "initargs": (log_queue, self.logger.getEffectiveLevel()),
+            "initargs": (log_queue, self.logger.getEffectiveLevel(), allowed_prefixes),
         }
 
         try:
