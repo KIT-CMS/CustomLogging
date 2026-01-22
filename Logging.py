@@ -212,6 +212,13 @@ class TqdmRichLiveIO(io.StringIO):
 # ---
 
 
+def capture_rich_renderable_as_string(renderable, width: int = 200) -> str:
+    string_io = io.StringIO()
+    capture_console = Console(file=string_io, record=True, width=width)
+    capture_console.print(renderable)
+    return string_io.getvalue()
+
+
 def is_in_ipython():
     try:
         from IPython import get_ipython
