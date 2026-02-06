@@ -604,12 +604,18 @@ class LogContext:
 
         Logs are still written to the file handler.
         """
+        console_handler = next((h for h in logging.getLogger().handlers if isinstance(h, RichHandler)), None)
+
+        if not console_handler:
+            yield
+
         suppress_filter = SuppressFilter()
-        self.logger.addFilter(suppress_filter)
+        console_handler.filters.insert(0, suppress_filter)
+
         try:
             yield
         finally:
-            self.logger.removeFilter(suppress_filter)
+            console_handler.removeFilter(suppress_filter)
 
     @contextmanager
     def duplicate_filter(self) -> Generator[None, None, None]:
@@ -699,16 +705,23 @@ class LogContext:
         Useful for not flooding the terminal with output from libraries that print directly
         to the console.
         """
-        if is_in_ipython():
-            from IPython.display import display
-            from ipywidgets import Output
 
-            out = Output()
-            with out:
-                yield
-        else:
-            with open(os.devnull, 'w') as f, redirect_stdout(f), redirect_stderr(f):
-                yield
+        original_quiet = CONSOLE.quiet
+        CONSOLE.quiet = True
+
+        try:
+            if is_in_ipython():
+                from IPython.display import display
+                from ipywidgets import Output
+
+                out = Output()
+                with out:
+                    yield
+            else:
+                with open(os.devnull, 'w') as f, redirect_stdout(f), redirect_stderr(f):
+                    yield
+        finally:
+            CONSOLE.quiet = original_quiet
 
 
 class LogDecorator:
