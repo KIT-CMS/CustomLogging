@@ -249,6 +249,9 @@ def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
         LOG_STATE["handler"].flush()
 
     # sys.__excepthook__(exc_type, exc_value, exc_traceback)
+    if threading.current_thread() is threading.main_thread():
+        sys.stdout.flush(); sys.stderr.flush()
+        os._exit(1)  # skip ROOT/XrdCl teardown, which can deadlock after a JIT error
 
 
 def handle_thread_exception(args):
